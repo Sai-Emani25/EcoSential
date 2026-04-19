@@ -47,8 +47,13 @@ service cloud.firestore {
     match /sites/{siteId} {
       allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
       allow create: if isSignedIn() && isValidId(siteId) && isValidSite(incoming());
-      allow update: if isSignedIn() && isOwner(existing().ownerId) && isValidSite(incoming()) &&
-                    incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'location', 'healthScore', 'lastAuditDate']);
+      allow update: if isSignedIn() && isOwner(existing().ownerId) && 
+                    (
+                      // Action: Standard Edit
+                      (incoming().diff(existing()).affectedKeys().hasOnly(['name', 'location', 'description', 'healthScore'])) ||
+                      // Action: System Update (Audit Completion)
+                      (incoming().diff(existing()).affectedKeys().hasOnly(['latestThreatLevel', 'lastAuditAt']))
+                    );
       allow delete: if isSignedIn() && isOwner(existing().ownerId);
       
       // Subcollection: Audits
@@ -57,7 +62,7 @@ service cloud.firestore {
         allow create: if isSignedIn() && isValidId(auditId) &&
                       get(/databases/$(database)/documents/sites/$(siteId)).data.ownerId == request.auth.uid &&
                       isValidAudit(incoming());
-        allow update: if false; // Audits are immutable
+        allow update: if false; // Audits are strictly immutable
         allow delete: if isSignedIn() && get(/databases/$(database)/documents/sites/$(siteId)).data.ownerId == request.auth.uid;
       }
     }
@@ -65,13 +70,13 @@ service cloud.firestore {
     function isValidSite(data) {
       return data.ownerId == request.auth.uid &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
-             data.createdAt == request.time;
+             (data.keys().hasAll(['createdAt']) ? data.createdAt == request.time : true);
     }
 
     function isValidAudit(data) {
       return data.auditorId == request.auth.uid &&
              data.siteId is string &&
-             data.imageUrl is string && data.imageUrl.size() <= 2048 &&
+             data.imageUrl is string && data.imageUrl.size() <= 1500000 && // Allowing space for base64 images (~1.1MB)
              data.createdAt == request.time;
     }
   }

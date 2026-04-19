@@ -17,11 +17,13 @@ async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
 
-  // Gemini API Initialization (Server-side only)
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-
   // Machine Identity for this instance
-  const UNIT_ID = `SENTINEL-${crypto.createHash('sha256').update(process.env.AUTH0_CLIENT_ID || 'PROTOTYPE').digest('hex').slice(0, 8).toUpperCase()}`;
+  if (!process.env.AUTH0_CLIENT_ID) {
+    console.warn("AUTH0_CLIENT_ID not found. Machine identity will be in 'NON_VERIFIED' state.");
+  }
+  const UNIT_ID = process.env.AUTH0_CLIENT_ID 
+    ? `SENTINEL-${crypto.createHash('sha256').update(process.env.AUTH0_CLIENT_ID).digest('hex').slice(0, 8).toUpperCase()}`
+    : 'SENTINEL-UNIDENTIFIED';
 
   // API Route: Auth0 Login URL (Following oauth-integration skill)
   app.get('/api/auth/url', (req, res) => {
@@ -65,82 +67,37 @@ async function startServer() {
     `);
   });
 
-  // API Route: Environmental Analysis
-  app.post("/api/analyze", async (req, res) => {
+  // API Route: Digital Report Signing
+  app.post("/api/sign-report", (req, res) => {
     try {
-      const { imageBase64, mimeType } = req.body;
+      const data = req.body;
       
-      if (!process.env.GEMINI_API_KEY) {
-        return res.status(500).json({ error: "GEMINI_API_KEY is not configured on the server." });
+      // Sign the result content using the Auth0 Client Secret to verify authenticity
+      const signableContent = JSON.stringify(data);
+      const secret = process.env.AUTH0_CLIENT_SECRET;
+      
+      if (!secret) {
+        // Log it but don't crash, the UI handles signed vs unsigned
+        console.warn("AUTH0_CLIENT_SECRET missing. Skipping report signature.");
+        return res.json({
+          ...data,
+          unit_id: UNIT_ID,
+          signature: null
+        });
       }
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [
-          {
-            parts: [
-              {
-                text: `Act as a Lead Environmental Consultant. Analyze this image for violations of ISO 14001 standards. 
-                Identify the primary ecological impact and generate a 3-step remediation plan.
-                Important: The 'detailed_analysis' field MUST be formatted with professional Markdown (including headers, lists, and bold text) to provide a rich, readable report.
-                Provide the output in a structured JSON format following the schema provided.`
-              },
-              {
-                inlineData: {
-                  data: imageBase64,
-                  mimeType
-                }
-              }
-            ]
-          }
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              agent_role: { type: Type.STRING },
-              primary_impact: { type: Type.STRING },
-              threat_level: { type: Type.STRING, enum: ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
-              iso_compliance_status: { type: Type.STRING },
-              remediation_plan: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    step: { type: Type.STRING },
-                    description: { type: Type.STRING }
-                  },
-                  required: ["step", "description"]
-                }
-              },
-              detailed_analysis: { 
-                type: Type.STRING,
-                description: "Detailed environmental findings formatted in Markdown."
-              }
-            },
-            required: ["agent_role", "primary_impact", "threat_level", "remediation_plan", "detailed_analysis"]
-          }
-        }
-      });
-
-      const result = JSON.parse(response.text || "{}");
-      
-      // Digital Signing Logic
-      // Sign the result content using the Auth0 Client Secret (or a fallback) to verify authenticity
-      const signableContent = JSON.stringify(result);
-      const hmac = crypto.createHmac('sha256', process.env.AUTH0_CLIENT_SECRET || 'eco-sentinel-fallback-secret');
+      const hmac = crypto.createHmac('sha256', secret);
       hmac.update(signableContent);
       const signature = hmac.digest('hex');
 
       res.json({
-        ...result,
+        ...data,
         unit_id: UNIT_ID,
-        signature: `${signature.slice(0, 16)}...` // Truncate for UI display but it's cryptographically derived
+        signature: `${signature.slice(0, 16)}...`
       });
     } catch (error: any) {
-      console.error("Analysis Error:", error);
-      res.status(500).json({ error: error.message || "Failed to analyze environmental site" });
+      console.error("Signing Error:", error);
+      res.status(500).json({ error: "Failed to digitally sign report" });
     }
   });
 
