@@ -1,0 +1,78 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- User Profiles ---
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+    }
+
+    function isValidUser(data) {
+      return data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 256;
+    }
+
+    // --- Sites ---
+    match /sites/{siteId} {
+      allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(siteId) && isValidSite(incoming());
+      allow update: if isSignedIn() && isOwner(existing().ownerId) && isValidSite(incoming()) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'location', 'healthScore', 'lastAuditDate']);
+      allow delete: if isSignedIn() && isOwner(existing().ownerId);
+      
+      // Subcollection: Audits
+      match /audits/{auditId} {
+        allow read: if isSignedIn() && get(/databases/$(database)/documents/sites/$(siteId)).data.ownerId == request.auth.uid;
+        allow create: if isSignedIn() && isValidId(auditId) &&
+                      get(/databases/$(database)/documents/sites/$(siteId)).data.ownerId == request.auth.uid &&
+                      isValidAudit(incoming());
+        allow update: if false; // Audits are immutable
+        allow delete: if isSignedIn() && get(/databases/$(database)/documents/sites/$(siteId)).data.ownerId == request.auth.uid;
+      }
+    }
+
+    function isValidSite(data) {
+      return data.ownerId == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidAudit(data) {
+      return data.auditorId == request.auth.uid &&
+             data.siteId is string &&
+             data.imageUrl is string && data.imageUrl.size() <= 2048 &&
+             data.createdAt == request.time;
+    }
+  }
+}

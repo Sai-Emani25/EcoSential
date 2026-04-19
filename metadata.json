@@ -1,0 +1,6 @@
+{
+  "name": "EcoSentinel",
+  "description": "Autonomous multimodal AI agent for environmental auditing and ecological threat detection using Gemini 1.5 Flash.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["multimodal_analysis", "environmental_compliance"]
+}

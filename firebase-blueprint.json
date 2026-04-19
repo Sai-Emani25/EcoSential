@@ -1,0 +1,65 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Site": {
+      "title": "Environmental Site",
+      "description": "A specific geographic area being monitored",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "location": { "type": "string" },
+        "lastAuditDate": { "type": "string", "format": "date-time" },
+        "healthScore": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "ownerId"]
+    },
+    "Audit": {
+      "title": "Environmental Audit",
+      "description": "A single audit report for a site",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "siteId": { "type": "string" },
+        "auditorId": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "threatLevel": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "findings": { "type": "string" },
+        "remediationPlan": { "type": "string" },
+        "structuredData": { "type": "object" },
+        "isoCompliance": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["siteId", "auditorId", "imageUrl"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User storage"
+    },
+    "/sites/{siteId}": {
+      "schema": "Site",
+      "description": "Environmental monitoring sites"
+    },
+    "/sites/{siteId}/audits/{auditId}": {
+      "schema": "Audit",
+      "description": "Audit records for a specific site"
+    }
+  }
+}
