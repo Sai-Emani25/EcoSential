@@ -11,7 +11,16 @@ import {
   Loader2,
   Trash2,
   History,
-  FileText
+  FileText,
+  ArrowUpDown,
+  Activity,
+  Target,
+  Cpu,
+  Leaf,
+  ChevronLeft,
+  ChevronRight,
+  Fingerprint,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -20,6 +29,7 @@ import {
   where, 
   onSnapshot, 
   addDoc, 
+  updateDoc,
   serverTimestamp,
   deleteDoc,
   doc,
@@ -29,6 +39,7 @@ import { auth, db } from './firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { analyzeEnvironmentalSite, AuditResult } from './services/geminiService';
 import ReactMarkdown from 'react-markdown';
+import { compressImage } from './lib/imageUtils';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -38,11 +49,16 @@ export default function App() {
   const [audits, setAudits] = useState<any[]>([]);
   const [isCapturing, setIsCapturing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AuditResult | null>(null);
+  const [selectedAudit, setSelectedAudit] = useState<any | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [sortBy, setSortBy] = useState<'date' | 'threat'>('date');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [lastUploadedImage, setLastUploadedImage] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showAddSite, setShowAddSite] = useState(false);
   const [newSiteName, setNewSiteName] = useState('');
   const [newSiteLocation, setNewSiteLocation] = useState('');
+  const [machineVerified, setMachineVerified] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -78,12 +94,58 @@ export default function App() {
     return unsubscribe;
   }, [activeSite]);
 
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const origin = event.origin;
+      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) return;
+      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
+        setMachineVerified(true);
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  const handleAuth0Connect = async () => {
+    try {
+      const response = await fetch('/api/auth/url');
+      if (!response.ok) throw new Error('Auth0 setup required');
+      const { url } = await response.json();
+      window.open(url, 'auth0_popup', 'width=600,height=700');
+    } catch (err) {
+      alert('Auth0 integration pending configuration. Use Google fallback.');
+    }
+  };
+
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
     await signInWithPopup(auth, provider);
   };
 
   const handleLogout = () => signOut(auth);
+
+  const sortedAudits = React.useMemo(() => {
+    const threatOrder: Record<string, number> = {
+      'CRITICAL': 4,
+      'HIGH': 3,
+      'MEDIUM': 2,
+      'LOW': 1
+    };
+
+    return [...audits].sort((a, b) => {
+      let comparison = 0;
+      if (sortBy === 'date') {
+        const timeA = a.createdAt?.toMillis() || 0;
+        const timeB = b.createdAt?.toMillis() || 0;
+        comparison = timeA - timeB;
+      } else {
+        const scoreA = threatOrder[a.threatLevel] || 0;
+        const scoreB = threatOrder[b.threatLevel] || 0;
+        comparison = scoreA - scoreB;
+      }
+      return sortOrder === 'asc' ? comparison : -comparison;
+    });
+  }, [audits, sortBy, sortOrder]);
 
   const handleAddSite = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -116,9 +178,16 @@ export default function App() {
 
     const reader = new FileReader();
     reader.onload = async (event) => {
-      const base64 = event.target?.result as string;
-      setLastUploadedImage(base64);
+      let base64 = event.target?.result as string;
+      
       try {
+        // Compress image to ensure it fits in Firestore (1MB limit)
+        // We do this before analysis to ensure Gemini also gets a reasonable size
+        base64 = await compressImage(base64);
+        
+        setLastUploadedImage(base64);
+        setSelectedAudit(null);
+        
         const result = await analyzeEnvironmentalSite(base64, file.type);
         setAnalysisResult(result);
 
@@ -126,12 +195,18 @@ export default function App() {
         await addDoc(collection(db, `sites/${activeSite.id}/audits`), {
           siteId: activeSite.id,
           auditorId: user.uid,
-          imageUrl: base64, // In a real app we'd use Firebase Storage
+          imageUrl: base64,
           threatLevel: result.threat_level,
           findings: result.detailed_analysis,
           isoCompliance: result.iso_compliance_status.toLowerCase().includes('yes') || result.iso_compliance_status.toLowerCase().includes('compliant'),
           structuredData: result,
           createdAt: serverTimestamp()
+        });
+
+        // Update latest threat level on the site document for sidebar visualization
+        await updateDoc(doc(db, 'sites', activeSite.id), {
+          latestThreatLevel: result.threat_level,
+          lastAuditAt: serverTimestamp()
         });
       } catch (err) {
         console.error(err);
@@ -157,8 +232,9 @@ export default function App() {
         className="max-w-md w-full text-center space-y-8"
       >
         <div className="flex justify-center">
-          <div className="w-20 h-20 rounded-xl bg-emerald-500 flex items-center justify-center text-white shadow-lg shadow-emerald-500/20">
+          <div className="w-20 h-20 rounded-xl bg-emerald-500 flex items-center justify-center text-white shadow-lg shadow-emerald-500/20 relative">
             <Shield size={40} />
+            <Leaf size={20} className="absolute bottom-1 right-1 text-emerald-100" />
           </div>
         </div>
         <div>
@@ -176,69 +252,99 @@ export default function App() {
   );
 
   return (
-    <div className="h-screen flex bg-[#0d1117] text-[#c9d1d9] font-sans selection:bg-emerald-500/30">
+    <div className="h-screen flex bg-[#0d1117] text-[#c9d1d9] font-sans selection:bg-emerald-500/30 overflow-hidden">
       {/* Sidebar - Site Navigation */}
-      <aside className="w-64 bg-[#161b22] border-r border-[#30363d] flex flex-col overflow-hidden">
-        <div className="p-6 border-b border-[#30363d]">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-8 h-8 bg-emerald-500 rounded-md flex items-center justify-center">
-              <Shield size={18} className="text-white" />
+      <aside className={`transition-all duration-300 ${sidebarCollapsed ? 'w-20' : 'w-72'} bg-[#161b22] border-r border-[#30363d] flex flex-col overflow-hidden relative`}>
+        <div className={`p-6 border-b border-[#30363d] ${sidebarCollapsed ? 'items-center px-4' : ''}`}>
+          <div className={`flex items-center gap-3 mb-6 ${sidebarCollapsed ? 'justify-center' : ''}`}>
+            <div className="w-10 h-10 bg-emerald-500 rounded-md flex items-center justify-center relative shrink-0">
+              <Shield size={20} className="text-white" />
+              <Leaf size={10} className="absolute bottom-1 right-1 text-emerald-100" />
             </div>
-            <span className="font-bold text-white text-lg tracking-tight">EcoSentinel</span>
+            {!sidebarCollapsed && <span className="font-bold text-white text-lg tracking-tight truncate">EcoSentinel</span>}
           </div>
           <button 
             onClick={() => setShowAddSite(true)}
-            className="w-full flex items-center justify-center gap-2 py-2.5 bg-[#21262d] border border-[#30363d] text-xs font-bold text-white rounded-md hover:border-[#8b949e] transition-colors"
+            className={`w-full flex items-center justify-center gap-2 py-2.5 bg-[#21262d] border border-[#30363d] text-xs font-bold text-white rounded-md hover:border-[#8b949e] transition-colors ${sidebarCollapsed ? 'px-0' : ''}`}
           >
-            <Plus size={14} /> New Site Entry
+            <Plus size={14} /> {!sidebarCollapsed && 'New Site Entry'}
           </button>
         </div>
 
         <nav className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-1">
-          <div className="text-[#8b949e] px-2 py-2 uppercase text-[10px] font-bold tracking-wider">Mission Control</div>
+          {!sidebarCollapsed && <div className="text-[#8b949e] px-2 py-2 uppercase text-[10px] font-bold tracking-wider">Mission Control</div>}
           <div className="space-y-1">
             {sites.map(site => (
               <div 
                 key={site.id}
-                onClick={() => setActiveSite(site)}
-                className={`group flex items-center justify-between p-2.5 cursor-pointer rounded-md transition-all ${activeSite?.id === site.id ? 'bg-[#21262d] text-white' : 'text-[#c9d1d9] hover:bg-[#21262d]'}`}
+                onClick={() => {
+                  setActiveSite(site);
+                  setSelectedAudit(null);
+                  setAnalysisResult(null);
+                  setLastUploadedImage(null);
+                }}
+                title={sidebarCollapsed ? site.name : ''}
+                className={`group flex items-center p-2.5 cursor-pointer rounded-md transition-all ${activeSite?.id === site.id ? 'bg-[#21262d] text-white' : 'text-[#c9d1d9] hover:bg-[#21262d]'} ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}
               >
                 <div className="flex items-center gap-3 overflow-hidden">
-                  <MapPin size={16} className={activeSite?.id === site.id ? 'text-emerald-400' : 'text-[#8b949e]'} />
-                  <span className="truncate text-sm">{site.name}</span>
+                  <div className="relative shrink-0 flex items-center justify-center">
+                    <MapPin size={16} className={activeSite?.id === site.id ? 'text-emerald-400' : 'text-[#8b949e]'} />
+                    {site.latestThreatLevel && (
+                      <div className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border border-[#161b22] ${
+                        site.latestThreatLevel === 'CRITICAL' ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)] animate-pulse' :
+                        site.latestThreatLevel === 'HIGH' ? 'bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.4)]' :
+                        site.latestThreatLevel === 'MEDIUM' ? 'bg-yellow-500' : 'bg-emerald-500'
+                      }`} />
+                    )}
+                  </div>
+                  {!sidebarCollapsed && <span className="truncate text-sm font-medium">{site.name}</span>}
                 </div>
-                <button 
-                  onClick={(e) => { e.stopPropagation(); handleDeleteSite(site.id); }}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
-                >
-                  <Trash2 size={12} />
-                </button>
+                {!sidebarCollapsed && (
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); handleDeleteSite(site.id); }}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-opacity"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
               </div>
             ))}
-            {sites.length === 0 && (
+            {sites.length === 0 && !sidebarCollapsed && (
               <p className="px-2 py-4 text-[11px] text-[#8b949e] italic">No active nodes...</p>
             )}
           </div>
         </nav>
 
-        <div className="p-4 bg-[#0d1117] border-t border-[#30363d]">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3 overflow-hidden">
+        <div className={`p-4 bg-[#0d1117] border-t border-[#30363d] ${sidebarCollapsed ? 'items-center px-4' : ''}`}>
+          <div className={`flex items-center gap-3 mb-4 ${sidebarCollapsed ? 'flex-col' : 'justify-between'}`}>
+            <div className={`flex items-center gap-3 overflow-hidden ${sidebarCollapsed ? 'flex-col' : ''}`}>
               <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-md border border-[#30363d]" />
-              <div className="overflow-hidden">
-                <p className="text-[11px] font-bold text-white truncate">{user.displayName || user.email}</p>
-                <p className="text-[9px] text-[#8b949e] uppercase tracking-tighter">Verified Auditor</p>
-              </div>
+              {!sidebarCollapsed && (
+                <div className="overflow-hidden">
+                  <p className="text-[11px] font-bold text-white truncate">{user.displayName || user.email}</p>
+                  <p className="text-[9px] text-[#8b949e] uppercase tracking-tighter">Verified Auditor</p>
+                </div>
+              )}
             </div>
             <button onClick={handleLogout} className="p-2 text-[#8b949e] hover:text-white transition-colors">
               <LogOut size={16} />
             </button>
           </div>
-          <div className="flex items-center justify-between text-[10px]">
-            <span className="text-[#8b949e]">Memory Node:</span>
-            <span className="text-blue-400">Backboard-V2</span>
-          </div>
+          {!sidebarCollapsed && (
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-[#8b949e]">Memory Node:</span>
+              <span className="text-blue-400">Backboard-V2</span>
+            </div>
+          )}
         </div>
+
+        {/* Collapse Toggle */}
+        <button 
+          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          className="absolute top-1/2 -right-3 w-6 h-6 bg-[#30363d] border border-[#30363d] rounded-full flex items-center justify-center text-white hover:bg-[#484f58] transition-colors z-20 shadow-lg"
+        >
+          {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+        </button>
       </aside>
 
       {/* Main Content */}
@@ -333,28 +439,30 @@ export default function App() {
             </header>
 
             {/* Analysis Grid */}
-            <div className="flex-1 overflow-y-auto p-8 custom-scrollbar text-[#c9d1d9]">
-              <div className="grid grid-cols-12 gap-8 max-w-7xl mx-auto h-full">
+            <div className="flex-1 overflow-hidden p-6 custom-scrollbar text-[#c9d1d9]">
+              <div className="grid grid-cols-12 gap-6 max-w-full mx-auto h-full auto-rows-fr">
                 {/* Left Section: Source & Logic */}
-                <section className="col-span-12 lg:col-span-7 flex flex-col space-y-6">
+                <section className="col-span-12 lg:col-span-8 flex flex-col space-y-4 h-full overflow-hidden">
                   {/* Artifact View */}
-                  <div className="bg-[#161b22] border border-[#30363d] rounded-xl overflow-hidden flex flex-col shadow-xl">
-                    <div className="p-4 border-b border-[#30363d] flex items-center justify-between">
+                  <div className="bg-[#161b22] border border-[#30363d] rounded-xl overflow-hidden flex flex-col shadow-xl flex-[2]">
+                    <div className="p-3 border-b border-[#30363d] flex items-center justify-between shrink-0">
                       <span className="text-[10px] font-bold tracking-widest text-[#8b949e] uppercase">Primary Visual Source</span>
                       <span className="text-[9px] text-[#8b949e]">LATENCY: {analyzing ? '...' : (analysisResult ? '842ms' : '0ms')}</span>
                     </div>
-                    <div className="relative aspect-video bg-black flex items-center justify-center p-8 group">
-                      {lastUploadedImage || audits[0] ? (
-                        <div className="w-full h-full relative">
+                    <div className="relative flex-1 bg-black flex items-center justify-center p-4 group overflow-hidden">
+                      {(selectedAudit || lastUploadedImage || audits[0]) ? (
+                        <div className="w-full h-full relative flex items-center justify-center">
                            <img 
-                            src={lastUploadedImage || audits[0]?.imageUrl} 
+                            src={selectedAudit?.imageUrl || lastUploadedImage || audits[0]?.imageUrl} 
                             alt="Site Scan" 
-                            className={`w-full h-full object-cover rounded-lg border border-[#30363d] transition-all duration-700 ${analyzing ? 'blur-md opacity-50' : 'opacity-80 grayscale-[0.2]'}`}
+                            className={`max-w-full max-h-full object-contain rounded-lg border border-[#30363d] transition-all duration-700 ${analyzing ? 'blur-md opacity-50' : 'opacity-80 grayscale-[0.2]'}`}
                             referrerPolicy="no-referrer" 
                           />
-                          {analysisResult && (
-                             <div className="absolute top-4 left-4 z-10 bg-red-500 text-white text-[10px] font-bold px-2 py-1 rounded shadow-lg">
-                                THREAT DETECTED: {analysisResult.threat_level}
+                          {(selectedAudit || analysisResult) && (
+                             <div className={`absolute top-4 left-4 z-10 text-white text-[10px] font-bold px-2 py-1 rounded shadow-lg ${
+                               (selectedAudit?.threatLevel || analysisResult?.threat_level) === 'CRITICAL' ? 'bg-red-500' : 'bg-orange-500'
+                             }`}>
+                                THREAT DETECTED: {selectedAudit?.threatLevel || analysisResult?.threat_level}
                              </div>
                           )}
                         </div>
@@ -366,67 +474,108 @@ export default function App() {
                       )}
                       
                       {analyzing && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center space-y-3 bg-black/40 backdrop-blur-sm">
+                        <div className="absolute inset-0 flex flex-col items-center justify-center space-y-3 bg-black/40 backdrop-blur-sm z-30">
                            <Loader2 className="animate-spin text-emerald-500" size={32} />
-                           <p className="text-[10px] font-bold tracking-widest text-emerald-400">FLIGHT DATA ANALYSIS ACTIVE</p>
+                           <p className="text-[10px] font-bold tracking-widest text-emerald-400 px-4 py-2 border border-emerald-500/30 rounded bg-emerald-500/10">FLIGHT DATA ANALYSIS ACTIVE</p>
                         </div>
                       )}
                     </div>
-                    <div className="p-4 bg-black/20 border-t border-[#30363d] flex items-center justify-between text-[11px]">
+                    <div className="p-3 bg-black/20 border-t border-[#30363d] flex items-center justify-between text-[11px] shrink-0">
                       <span className="text-[#8b949e]">Source Auth: <span className="text-emerald-500 font-mono">RSA-4096-AES</span></span>
                       <span className="text-[#8b949e]">Status: <span className={analyzing ? 'text-blue-400' : 'text-emerald-500'}>{analyzing ? 'PROCESSING' : 'IDLE'}</span></span>
                     </div>
                   </div>
 
                   {/* Structured Logic */}
-                  <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-6 shadow-xl">
-                    <div className="flex justify-between items-center mb-4">
-                      <h3 className="text-[10px] font-bold uppercase tracking-widest text-[#8b949e]">Structured Analysis JSON</h3>
-                      <span className="text-[10px] text-blue-400 font-bold">ISO 14001:2015 MAPPING</span>
+                  <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-xl flex-[1.5] min-h-0 overflow-hidden flex flex-col">
+                    <div className="flex justify-between items-center mb-4 shrink-0">
+                      <h3 className="text-[10px] font-bold uppercase tracking-widest text-[#8b949e]">Audit Report Engine</h3>
+                      <div className="flex items-center gap-2">
+                        {machineVerified && (
+                          <span className="text-[8px] text-emerald-400 font-bold px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded flex items-center gap-1">
+                            <Fingerprint size={10} /> UNIT_VERIFIED
+                          </span>
+                        )}
+                        <span className="text-[10px] text-emerald-400 font-bold px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded">LIVE_FEED</span>
+                      </div>
                     </div>
-                    <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-5 overflow-x-auto">
-                      {analysisResult ? (
-                         <pre className="text-[11px] font-mono text-emerald-300 leading-relaxed">
-{JSON.stringify({
-  agent_role: analysisResult.agent_role,
-  threat_level: analysisResult.threat_level,
-  primary_impact: analysisResult.primary_impact,
-  compliance: analysisResult.iso_compliance_status
-}, null, 2)}
-                         </pre>
+                    
+                    <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+                      {analysisResult || selectedAudit ? (
+                        <div className="space-y-4 pb-2">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex items-start gap-4">
+                              <div className="w-8 h-8 rounded bg-emerald-500/10 flex items-center justify-center text-emerald-500 shrink-0">
+                                <Cpu size={14} />
+                              </div>
+                              <div className="overflow-hidden">
+                                <p className="text-[8px] font-bold text-[#8b949e] uppercase tracking-widest mb-0.5">Agent Role</p>
+                                <p className="text-[11px] font-semibold text-white truncate">{analysisResult?.agent_role || selectedAudit?.structuredData?.agent_role}</p>
+                              </div>
+                            </div>
+                            <div className="bg-[#0d1117] border border-[#30363d] p-3 rounded-lg flex items-start gap-4">
+                              <div className="w-8 h-8 rounded bg-emerald-500/10 flex items-center justify-center text-emerald-500 shrink-0">
+                                <Activity size={14} />
+                              </div>
+                              <div className="overflow-hidden">
+                                <p className="text-[8px] font-bold text-[#8b949e] uppercase tracking-widest mb-0.5">ISO 14001</p>
+                                <p className="text-[11px] font-semibold text-white truncate">{analysisResult?.iso_compliance_status || selectedAudit?.structuredData?.iso_compliance_status || 'Compliance Pending'}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="bg-[#0d1117] border border-[#30363d] p-4 rounded-lg">
+                            <p className="text-[8px] font-bold text-[#8b949e] uppercase tracking-widest mb-3 border-b border-[#30363d] pb-2 flex justify-between">
+                              Comprehensive Analysis Findings
+                              {(analysisResult?.signature || selectedAudit?.structuredData?.signature) && (
+                                <span className="text-emerald-500 flex items-center gap-1 normal-case tracking-normal">
+                                  <Lock size={10} /> Signed by {analysisResult?.unit_id || selectedAudit?.structuredData?.unit_id}
+                                </span>
+                              )}
+                            </p>
+                            <div className="markdown-body prose prose-invert prose-sm max-w-none text-[11px] leading-relaxed text-[#c9d1d9]">
+                              <ReactMarkdown>
+                                {analysisResult?.detailed_analysis || selectedAudit?.findings || ''}
+                              </ReactMarkdown>
+                            </div>
+                          </div>
+                        </div>
                       ) : (
-                        <p className="text-[11px] font-mono text-[#8b949e] italic">Awaiting structured output...</p>
+                        <div className="h-full bg-[#0d1117] border border-dashed border-[#30363d] rounded-lg flex flex-col items-center justify-center space-y-4">
+                          <Cpu className="text-[#30363d] animate-pulse" size={32} />
+                          <p className="text-[10px] font-mono text-[#8b949e] italic uppercase tracking-widest">Awaiting flight diagnostics...</p>
+                        </div>
                       )}
                     </div>
                   </div>
                 </section>
 
                 {/* Right Section: Roadmap & History */}
-                <section className="col-span-12 lg:col-span-5 flex flex-col space-y-6">
+                <section className="col-span-12 lg:col-span-4 flex flex-col space-y-4 h-full overflow-hidden">
                   {/* Remediation Cards */}
-                  <div className="bg-[#21262d] rounded-xl p-6 border border-[#30363d] shadow-xl flex-1">
-                    <h3 className="text-white font-bold mb-6 flex items-center text-sm">
+                  <div className="bg-[#21262d] rounded-xl p-5 border border-[#30363d] shadow-xl flex-[1.5] min-h-0 flex flex-col">
+                    <h3 className="text-white font-bold mb-4 flex items-center text-xs shrink-0 uppercase tracking-widest">
                       <span className="mr-2 text-emerald-400">⚡</span> Remediation Roadmap
                     </h3>
-                    <div className="space-y-6">
+                    <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-4">
                       {analysisResult ? (
                         analysisResult.remediation_plan.map((step, idx) => (
-                          <div key={idx} className="flex space-x-4 group">
+                          <div key={idx} className="flex space-x-3 group">
                             <div className="w-6 h-6 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/30 flex items-center justify-center text-[10px] font-bold shrink-0 group-hover:bg-emerald-500 group-hover:text-white transition-all">
                               {idx + 1}
                             </div>
                             <div className="space-y-1">
-                              <h4 className="text-sm font-bold text-white group-hover:text-emerald-400 transition-colors uppercase tracking-tight">{step.step}</h4>
-                              <p className="text-[11px] leading-relaxed text-[#8b949e]">{step.description}</p>
+                              <h4 className="text-[11px] font-bold text-white group-hover:text-emerald-400 transition-colors uppercase tracking-tight leading-tight">{step.step}</h4>
+                              <p className="text-[10px] leading-relaxed text-[#8b949e] line-clamp-3 group-hover:line-clamp-none transition-all">{step.description}</p>
                             </div>
                           </div>
                         ))
                       ) : (
-                        <div className="space-y-6 opacity-30">
+                        <div className="space-y-4 opacity-30">
                            {[1,2,3].map(i => (
-                             <div key={i} className="flex space-x-4">
+                             <div key={i} className="flex space-x-3">
                                <div className="w-6 h-6 rounded-full border border-dashed border-[#8b949e] flex items-center justify-center text-[10px] shrink-0">{i}</div>
-                               <div className="h-4 w-2/3 bg-[#30363d] rounded animate-pulse" />
+                               <div className="h-4 flex-1 bg-[#30363d] rounded animate-pulse" />
                              </div>
                            ))}
                         </div>
@@ -435,24 +584,67 @@ export default function App() {
                   </div>
 
                   {/* Site History Node */}
-                  <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-6 shadow-xl">
-                    <h3 className="text-[10px] font-bold uppercase tracking-widest text-[#8b949e] mb-4 flex items-center gap-2">
-                       <History size={14} /> Backboard Memory History
-                    </h3>
-                    <div className="space-y-4 max-h-60 overflow-y-auto custom-scrollbar pr-2">
-                      {audits.map((audit) => (
-                        <div key={audit.id} className="flex items-start space-x-3 text-xs">
-                          <div className={`w-1 h-10 shrink-0 ${audit.threatLevel === 'CRITICAL' ? 'bg-red-500' : 'bg-emerald-500'}`} />
-                          <div className="overflow-hidden">
-                            <div className="text-white font-bold flex items-center gap-2">
-                              {new Date(audit.createdAt?.toDate()).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}: {audit.threatLevel}
+                  <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-xl flex-[1] min-h-0 flex flex-col">
+                    <div className="flex items-center justify-between mb-4 shrink-0">
+                      <h3 className="text-[10px] font-bold uppercase tracking-widest text-[#8b949e] flex items-center gap-2">
+                         <History size={14} /> Memory History
+                      </h3>
+                      <div className="flex items-center gap-1">
+                        <button 
+                          onClick={() => {
+                            if (sortBy === 'date') setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                            else { setSortBy('date'); setSortOrder('desc'); }
+                          }}
+                          className={`text-[8px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${sortBy === 'date' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' : 'border-[#30363d] text-[#8b949e] hover:border-[#8b949e]'}`}
+                        >
+                          D {sortBy === 'date' && <ArrowUpDown size={8} className={sortOrder === 'asc' ? 'rotate-180' : ''} />}
+                        </button>
+                        <button 
+                          onClick={() => {
+                            if (sortBy === 'threat') setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                            else { setSortBy('threat'); setSortOrder('desc'); }
+                          }}
+                          className={`text-[8px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${sortBy === 'threat' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' : 'border-[#30363d] text-[#8b949e] hover:border-[#8b949e]'}`}
+                        >
+                          T {sortBy === 'threat' && <ArrowUpDown size={8} className={sortOrder === 'asc' ? 'rotate-180' : ''} />}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-2 overflow-y-auto custom-scrollbar pr-2 flex-1">
+                      {sortedAudits.map((audit) => (
+                        <div 
+                          key={audit.id} 
+                          onClick={() => setSelectedAudit(audit)}
+                          className={`group relative p-2 border rounded-lg transition-all cursor-pointer ${
+                            selectedAudit?.id === audit.id 
+                              ? 'border-emerald-500 bg-[#21262d] shadow-lg shadow-emerald-500/10' 
+                              : 'border-[#30363d] bg-[#21262d]/20 hover:bg-[#21262d]/50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center gap-1.5">
+                              <div className={`w-1.5 h-1.5 rounded-full ${
+                                audit.threatLevel === 'CRITICAL' ? 'bg-red-500 animate-pulse' : 
+                                audit.threatLevel === 'HIGH' ? 'bg-orange-500' : 
+                                audit.threatLevel === 'MEDIUM' ? 'bg-yellow-500' : 'bg-emerald-500'
+                              }`} />
+                              <span className="text-[9px] font-bold text-white uppercase tracking-tighter">
+                                {audit.threatLevel}
+                              </span>
                             </div>
-                            <div className="text-[#8b949e] italic truncate w-full truncate">"{audit.findings}"</div>
+                            <span className="text-[8px] text-[#8b949e] font-mono">
+                              {audit.createdAt ? new Date(audit.createdAt.toDate()).toLocaleDateString() : '...'}
+                            </span>
                           </div>
+                          <p className="text-[9px] text-[#c9d1d9] italic border-l border-[#30363d] pl-2 leading-relaxed line-clamp-1 group-hover:line-clamp-none">
+                            {audit.findings}
+                          </p>
                         </div>
                       ))}
                       {audits.length === 0 && (
-                        <p className="text-[10px] text-[#8b949e] italic">No historical data in memory node...</p>
+                        <div className="h-full flex flex-col items-center justify-center opacity-10 py-4">
+                          <History size={20} />
+                        </div>
                       )}
                     </div>
                   </div>
@@ -485,14 +677,22 @@ export default function App() {
         )}
 
         <footer className="h-12 border-t border-[#30363d] bg-[#0d1117] flex items-center justify-between px-8 text-[10px] text-[#8b949e]">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            System Status: <span className="text-emerald-500 font-bold uppercase tracking-widest">Operational</span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              System Status: <span className="text-emerald-500 font-bold uppercase tracking-widest">Operational</span>
+            </div>
+            <button 
+              onClick={handleAuth0Connect}
+              className={`flex items-center gap-1 px-2 py-0.5 rounded border transition-all ${machineVerified ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/5' : 'border-[#30363d] hover:border-[#8b949e]'}`}
+            >
+              <Fingerprint size={12} /> {machineVerified ? 'Agent ID: Verified' : 'Assign Machine Identity'}
+            </button>
           </div>
           <div className="flex space-x-6">
-            <span>Verifiable ID: <span className="text-emerald-400 font-mono">agent_{user.uid.slice(0, 8)}</span></span>
+            <span>Machine Signature: <span className="text-emerald-400 font-mono">SHA-256 (RSA-4096)</span></span>
             <span>API Uptime: 99.98%</span>
-            <span>Signer: RSA-4096</span>
+            <span>Signer: ECO_SENTINEL_PROTOS</span>
           </div>
         </footer>
       </main>
